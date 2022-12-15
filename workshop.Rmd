@@ -1,0 +1,293 @@
+---
+title: 'UofT GASPS Workshop on Analysing Trade with the Structural Gravity Model'
+author: 'Pacha'
+university: 'University of Toronto'
+department: 'Department of Political Science'
+output:
+  rmarkdown::pdf_document:
+    highlight: tango # "default", "tango", "pygments", "kate", "monochrome", "espresso", "zenburn", "haddock"
+    template: "../tex/template.tex"
+    latex_engine: pdflatex
+bibliography: ../bib/references.bib
+csl: ../csl/chicago_manual_of_style_17th_edition_author_date.csl # Download your specific csl file and refer to it in the line below (see https://www.zotero.org/styles/)
+fontsize: 11pt
+linespacing: 1.0
+margin: 1in
+paper: letterpaper # a4paper, executivepaper, legalpaper, etc also works
+amsmath: true
+sansserif: false
+creativecommons: by
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE)
+```
+
+# Disclaimer
+
+The views and opinions expressed in this course are solely those
+of the author and do not necessarily reflect the official position
+of any unit of the OECD, the University of Toronto or the
+Pontifical Catholic University of Chile.
+
+This workshop is based on @borchert_international_2021, @gurevich_dynamic_2018 
+and @yotov_advanced_2016 and assumes basic R knowledge.
+
+# Getting the most out of this material
+
+You can clone the GitHub repository to obtain the editable R files:
+
+```
+git clone https://github.com/pachadotdev/uoft-gasps-gravity-2022.git
+```
+
+Please read https://happygitwithr.com/ if you have questions about git or GitHub.
+
+# Packages
+
+Required packages for this workshop:
+
+```{r pkgs}
+library(usitcgravity) # data
+library(dplyr) # data cleaning/transformation/aggregation
+library(tidyr) # nest/unnest data
+library(purrr) # iteration
+library(fixest) # regression
+library(broom) # tidy regression results
+library(duckdb) # additional SQL operations
+```
+
+`usitcgravity` has to be installed from GitHub. One option to install it is
+by running:
+
+```r
+install.packages("remotes")
+install_github("pachadotdev/usitcgravity")
+```
+
+# Data
+
+We are going to read directly from SQL. We can open a connection by using a
+function in `usitcgravity`.
+
+```{r data}
+con <- usitcgravity_connect()
+```
+
+Let's create a panel for the period 1986-2006 in intervals of 4 years. The
+required steps are:
+
+1. Aggregate trade at sector level (4 sectors)
+2. Add sector names
+3. Add structural gravity variables
+4. Move the data into R
+5. Log trade and distance + create pair variable
+
+Let's have a look at the tables:
+
+```{r}
+dbListTables(con)
+```
+
+Then check the `sector_names` table:
+
+```{r}
+tbl(con, "sector_names") %>% collect()
+```
+
+In order to create four panels (one per sector), we can create vectors to 
+filter the years and sectors, iterate over `broad_sector_id`, and proceed with
+the rest of the steps.
+
+In this particular case I transform the variables at
+the end, because it is more flexible to transform data in R than in SQL.
+
+By using `purrr` we can create a list of tibbles which shall be used to estimate 
+four models (i.e., specific sector effects) for the price of one.
+
+This can be done in one chunk:
+
+```{r data2}
+yrs <- seq(1986L, 2006L, 4)
+
+sctrs <- tbl(con, "sector_names") %>%
+  pull(broad_sector_id)
+
+gravity <- map(
+  sctrs,
+  function(s) {
+    tbl(con, "trade") %>%
+      filter(year %in% yrs, broad_sector_id == s) %>%
+      select(year, exporter_iso3, importer_iso3, broad_sector_id, trade) %>%
+      group_by(year, exporter_iso3, importer_iso3, broad_sector_id) %>%
+      summarise(trade = sum(trade, na.rm = T)) %>%
+      
+      left_join(
+        tbl(con, "sector_names")
+      ) %>%
+      select(year, exporter_iso3, importer_iso3, broad_sector, trade) %>%
+      
+      left_join(
+        tbl(con, "gravity") %>%
+          select(year,
+            exporter_iso3 = iso3_o, importer_iso3 = iso3_d, distance,
+            contiguity, common_language, colony_ever
+          )
+      ) %>%
+      
+      collect() %>%
+      
+      mutate(
+        log_trade = log(trade),
+        log_distance = log(distance),
+        pair = paste(exporter_iso3, importer_iso3, sep = "_"),
+      )
+  }
+)
+
+dbDisconnect(con, shutdown = T)
+```
+
+# OLS estimates
+
+Consider a simple especification of the structural gravity model of trade:
+\begin{align}
+\log X_{ij,k,t} =& \beta_0 + \beta_1 DIST_{i,j} + \beta_2 CNTG_{i,j} + \beta_3 LANG_{i,j} + \beta_4 CLNY_{i,j} + \varepsilon_{ij,t}
+\end{align}
+
+We need to remove 0 flows. If we don't do this, `lm` fails because 
+`log(0) = -Inf`.
+
+```{r ols}
+map(
+  seq_along(gravity),
+  function(s) {
+    d <- gravity[[s]] %>%
+      filter(exporter_iso3 != importer_iso3, trade > 0)
+
+    fit <- feols(log_trade ~ log_distance + contiguity + common_language +
+      colony_ever,
+    data = d
+    )
+
+    return(tidy(fit))
+  }
+)
+```
+
+It is good practice to compute clustered standard errors, so we use the "pair"
+variable previously created.
+
+```{r ols2}
+map(
+  seq_along(gravity),
+  function(s) {
+    d <- gravity[[s]] %>%
+      filter(exporter_iso3 != importer_iso3, trade > 0)
+
+    fit <- feols(log_trade ~ log_distance + contiguity + common_language +
+      colony_ever,
+    data = d,
+    cluster = ~pair
+    )
+
+    return(tidy(fit))
+  }
+)
+```
+
+It is (extremely) important to conduct a misspecification test. Some of the
+models pass the misspecification test.
+
+```{r ols3}
+map(
+  seq_along(gravity),
+  function(s) {
+    d <- gravity[[s]] %>%
+      filter(exporter_iso3 != importer_iso3, trade > 0)
+
+    fit <- feols(log_trade ~ log_distance + contiguity + common_language +
+      colony_ever,
+    data = d,
+    cluster = ~pair
+    )
+
+    d <- augment(fit, newdata = d) %>%
+      mutate(.fitted2 = .fitted^2)
+
+    fit_reset <- feols(log_trade ~ log_distance + contiguity + common_language +
+      colony_ever + .fitted2,
+    data = d,
+    cluster = ~pair
+    )
+
+    return(
+      tidy(fit_reset) %>%
+        filter(term == ".fitted2")
+    )
+  }
+)
+```
+
+# Poisson Pseudo Maximum Likelihood
+
+The PPML model is written in multiplicative form and allows zero flows.
+\begin{align}
+X_{ij,k,t} =& \exp[\beta_0 + \beta_1 DIST_{i,j} + \beta_2 CNTG_{i,j} + \beta_3 LANG_{i,j} + \beta_4 CLNY_{i,j}] \times \varepsilon_{ij,t}
+\end{align}
+
+We evaluate the model as we did before, the code changes are minimal.
+
+```{r ppml1}
+map(
+  seq_along(gravity),
+  function(s) {
+    d <- gravity[[s]] %>%
+      filter(exporter_iso3 != importer_iso3)
+
+    fit <- fepois(trade ~ log_distance + contiguity + common_language +
+      colony_ever,
+    data = d,
+    cluster = ~pair
+    )
+
+    return(tidy(fit))
+  }
+)
+```
+
+Now we explore the RESET test as before. The RESET test fails for some models.
+
+```{r ppml2}
+map(
+  seq_along(gravity),
+  function(s) {
+    d <- gravity[[s]] %>%
+      filter(exporter_iso3 != importer_iso3)
+
+    fit <- feols(trade ~ log_distance + contiguity + common_language +
+      colony_ever,
+    data = d,
+    cluster = ~pair
+    )
+
+    d <- augment(fit, newdata = d, type.predict = "link") %>%
+      mutate(.fitted2 = .fitted^2)
+
+    fit_reset <- feols(trade ~ log_distance + contiguity + common_language +
+      colony_ever + .fitted2,
+    data = d,
+    cluster = ~pair
+    )
+
+    return(
+      tidy(fit_reset) %>%
+        filter(term == ".fitted2")
+    )
+  }
+)
+```
+
+\newpage
+
+# References
