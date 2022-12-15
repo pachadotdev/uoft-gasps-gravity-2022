@@ -1,7 +1,4 @@
-# uoft-gasps-gravity-2022
-
-<!-- badges: start -->
-<!-- badges: end -->
+# UofT GASPS Workshop on Analysing Trade with the Structural Gravity Model
 
 The goal of uoft-gasps-gravity-2022 is to show some advanced data manipulation with SQL, purrr and dplyr.
 
