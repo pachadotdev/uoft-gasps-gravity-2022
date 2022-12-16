@@ -256,38 +256,6 @@ map(
 )
 ```
 
-Now we explore the RESET test as before. The RESET test fails for some models.
-
-```{r ppml2}
-map(
-  seq_along(gravity),
-  function(s) {
-    d <- gravity[[s]] %>%
-      filter(exporter_iso3 != importer_iso3)
-
-    fit <- feols(trade ~ log_distance + contiguity + common_language +
-      colony_ever,
-    data = d,
-    cluster = ~pair
-    )
-
-    d <- augment(fit, newdata = d, type.predict = "link") %>%
-      mutate(.fitted2 = .fitted^2)
-
-    fit_reset <- feols(trade ~ log_distance + contiguity + common_language +
-      colony_ever + .fitted2,
-    data = d,
-    cluster = ~pair
-    )
-
-    return(
-      tidy(fit_reset) %>%
-        filter(term == ".fitted2")
-    )
-  }
-)
-```
-
 \newpage
 
 # References
